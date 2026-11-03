@@ -1,0 +1,21 @@
+params:
+  - id: admin_username
+    type: string
+    name: Admin username
+    description: "Username of the initial account."
+    default_value: "admin"
+    optional: false
+  - id: admin_password
+    type: secret
+    name: Admin password
+    description: "Password of the initial account. Upstream ships admin/admin, so this replaces it."
+    default_value: "$random(len=20)"
+    optional: false
+locales:
+  zh:
+    admin_username:
+      name: 管理员用户名
+      description: 初始账号的用户名。
+    admin_password:
+      name: 管理员密码
+      description: 初始账号的密码。上游默认是 admin/admin，这里替换成随机值。

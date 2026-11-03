@@ -1,0 +1,18 @@
+package: community.lazycat.app.traggo
+name: Traggo
+version: 0.0.0
+description: "Tag-based time tracking: log hours by tags instead of rigid projects, then slice reports any way you like."
+min_os_version: "1.5.0"
+homepage: https://traggo.net/
+author: traggo
+license: GPL-3.0
+permissions:
+  required:
+    - net.internet
+locales:
+  zh:
+    name: Traggo
+    description: "基于标签的时间追踪：用标签记工时，报表能按任意维度切分。"
+  en:
+    name: Traggo
+    description: "Tag-based time tracking: log hours by tags instead of rigid projects, then slice reports any way you like."
