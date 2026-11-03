@@ -1,0 +1,134 @@
+name: Verify Traggo Release on GitHub
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to verify
+        required: false
+        default: v0.8.3
+permissions:
+  contents: read
+concurrency:
+  group: traggo-release-verification
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="$(gh release view --json tagName --jq .tagName)"; fi
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Download exact Release asset on runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ASSET_NAME="community.lazycat.app.traggo-${RELEASE_TAG}.lpk"
+          echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
+          gh release view "$RELEASE_TAG" --json tagName,assets > release-metadata.json
+          gh release download "$RELEASE_TAG" --pattern "$ASSET_NAME" --dir verify-pkg
+
+      - name: Verify package contents
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, re, tarfile, yaml
+
+          tag = os.environ['RELEASE_TAG']
+          name = os.environ['ASSET_NAME']
+          pkg = __import__('pathlib').Path('verify-pkg') / name
+          assert pkg.is_file(), pkg
+
+          h = hashlib.sha256()
+          with pkg.open('rb') as fh:
+              for chunk in iter(lambda: fh.read(1 << 20), b''):
+                  h.update(chunk)
+
+          with tarfile.open(pkg, 'r:') as package:
+              members = package.getnames()
+              for required in ('manifest.yml', 'package.yml', 'content.tar', 'icon.png'):
+                  assert required in members, (required, members)
+
+              info = yaml.safe_load(package.extractfile('package.yml').read())
+              assert info['package'] == 'community.lazycat.app.traggo', info['package']
+              assert info['name'] == 'Traggo', info['name']
+              assert info['version'] == tag.lstrip('v'), (info['version'], tag)
+              assert info['license'] == 'GPL-3.0', info['license']
+              assert info['min_os_version'] == '1.5.0', info['min_os_version']
+
+              raw = package.extractfile('manifest.yml').read().decode()
+              m = yaml.safe_load(raw)
+              app = m['application']
+              assert app['subdomain'] == 'traggo', app['subdomain']
+              # own accounts: no platform gate in front
+              assert app.get('public_path') == ['/'], app.get('public_path')
+              ups = app['upstreams']
+              assert any(u['location'] == '/' and 'traggo:3030' in (u.get('backend') or '')
+                         for u in ups), ups
+
+              svcs = m['services']
+              assert set(svcs) == {'traggo'}, set(svcs)
+              svc = svcs['traggo']
+              assert 'traggo/server' in svc['image'], svc['image']
+              assert svc['image'].endswith(':' + tag.lstrip('v')), svc['image']
+
+              env = ' '.join(str(x) for x in svc['environment'])
+              # upstream ships admin/admin; these two names are the documented
+              # override points, so both must be driven by deploy params
+              assert 'TRAGGO_DEFAULT_USER_NAME=' in env and '.U.admin_username' in env, env
+              assert 'TRAGGO_DEFAULT_USER_PASS=' in env and '.U.admin_password' in env, env
+              assert re.search(r'TRAGGO_DEFAULT_USER_PASS=\s*admin\b', env) is None, \
+                  'upstream weak default must not survive into the package'
+              assert 'TRAGGO_DATABASE_DIALECT=sqlite3' in env, env
+              # the sqlite file must sit on the persistent volume, not inside the image
+              assert 'TRAGGO_DATABASE_CONNECTION=/opt/traggo/data/' in env, env
+
+              binds = svc['binds']
+              assert any(b.endswith(':/opt/traggo/data') for b in binds), binds
+              for b in binds:
+                  assert b.startswith('/lzcapp/var/'), b
+
+              params = yaml.safe_load(package.extractfile('deploy_params.yml').read())
+              by_id = {q['id']: q for q in params['params']}
+              assert set(by_id) == {'admin_username', 'admin_password'}, set(by_id)
+              assert by_id['admin_password']['type'] == 'secret'
+              assert 'random' in str(by_id['admin_password'].get('default_value', ''))
+              refs = set(re.findall(r'\.U\.([A-Za-z0-9_]+)', raw))
+              assert refs <= set(by_id), (refs, set(by_id))
+
+              assert 'healthcheck' not in svc, svc
+              assert 'lzc-file-chooser' not in raw
+              assert 'docker.sock' not in raw
+              assert 'privileged' not in raw
+              assert 'usage' in m and str(m['usage']).strip(), 'usage section missing'
+              usage_text = str(m['usage'])
+              assert ('真机验证' in usage_text or '实机验证' in usage_text), 'usage must state no device test'
+
+              with tarfile.open(fileobj=package.extractfile('content.tar')) as content:
+                  cmembers = content.getnames()
+                  lic = [n for n in cmembers if 'licenses/' in n]
+                  assert lic, cmembers
+                  main_lic = [n for n in lic if n.endswith('/LICENSE')]
+                  target = main_lic[0] if main_lic else lic[0]
+                  license_text = content.extractfile(target).read().decode()
+                  flat = ' '.join(license_text.split())
+                  # GPL-3.0 text starts with the title in mixed case
+                  assert 'GNU GENERAL PUBLIC LICENSE' in flat and 'Version 3' in flat, flat[:150]
+
+          result = {
+              'verified': True,
+              'tag': tag,
+              'sha256': h.hexdigest(),
+              'size': pkg.stat().st_size,
+              'runtime_tested': False,
+              'note': 'single container with sqlite; upstream admin/admin overridden via deploy params',
+          }
+          print(json.dumps(result))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('```json\n' + json.dumps(result, indent=2) + '\n```\n')
+          PY
